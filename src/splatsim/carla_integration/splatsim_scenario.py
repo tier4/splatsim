@@ -79,12 +79,14 @@ class SplatSimScenario(BaseScenario):
         ground_projection: GroundProjectionConfig | None = None,
         random_seed: int = BaseScenario.DEFAULT_RANDOM_SEED,
         sensor_config: SplatSimCameraSensorConfig | None = None,
+        attach_to_existing_ego: bool = False,
     ) -> None:
         super().__init__(
             ego_config,
             spawn_pose=spawn_pose,
             ground_projection=ground_projection,
             random_seed=random_seed,
+            attach_to_existing_ego=attach_to_existing_ego,
         )
 
         if isinstance(scene, Scene):

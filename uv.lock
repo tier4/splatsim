@@ -89,7 +89,7 @@ dependencies = [
 [[package]]
 name = "autoware-carla-scenario"
 version = "0.1.0"
-source = { git = "https://github.com/tier4/autoware_lanelet2_to_opendrive.git?subdirectory=autoware_carla_scenario&rev=6165173a#6165173adc9d6ca4f110b8bba2d93ebaa9ec014c" }
+source = { git = "https://github.com/tier4/autoware_lanelet2_to_opendrive.git?subdirectory=autoware_carla_scenario&branch=feat%2Fattach-existing-ego#13e2d127c475cb53b34eb9ea494bd84cfca90f02" }
 dependencies = [
     { name = "cyclonedds", marker = "sys_platform == 'linux'" },
     { name = "fastapi", marker = "sys_platform == 'linux'" },
@@ -2110,7 +2110,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "3dgs-io", git = "https://github.com/autowarefoundation/3dgs_io.git?branch=feat%2Fusdz-io" },
-    { name = "autoware-carla-scenario", extras = ["carla-0-9-16"], marker = "extra == 'carla'", git = "https://github.com/tier4/autoware_lanelet2_to_opendrive.git?subdirectory=autoware_carla_scenario&rev=6165173a" },
+    { name = "autoware-carla-scenario", extras = ["carla-0-9-16"], marker = "extra == 'carla'", git = "https://github.com/tier4/autoware_lanelet2_to_opendrive.git?subdirectory=autoware_carla_scenario&branch=feat%2Fattach-existing-ego" },
     { name = "autoware-lanelet2-to-opendrive", marker = "extra == 'carla'", git = "https://github.com/tier4/autoware_lanelet2_to_opendrive.git?subdirectory=autoware_lanelet2_to_opendrive&rev=6165173a" },
     { name = "cyclonedds", marker = "extra == 'carla'", specifier = ">=11.0.1" },
     { name = "cyclonedds", marker = "extra == 'dds'", specifier = ">=11.0.1" },
