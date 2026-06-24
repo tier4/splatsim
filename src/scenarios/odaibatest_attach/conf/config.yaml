@@ -4,7 +4,7 @@ defaults:
   - ego: default
   - entity: default
   - traffic_manager: default
-  - scenario: spawn_only/default
+  - scenario: attach_only/default
   - splatsim: default
   - map: odaibatest
 

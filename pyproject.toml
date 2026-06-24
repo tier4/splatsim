@@ -74,7 +74,7 @@ dev = [
 
 [project.scripts]
 splatsim-viewer = "splatsim.viewer:main"
-spawn-scenario = "scenarios.odaibatest_spawn.run:main"
+attach-scenario = "scenarios.odaibatest_attach.run:main"
 splatsim-grpc-server = "splatsim.grpc_service.cli:main"
 splatsim-tile-server = "splatsim.tile_server.cli:main"
 

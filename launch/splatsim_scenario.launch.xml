@@ -2,13 +2,10 @@
   <arg name="carla_host" default="localhost"/>
   <arg name="carla_port" default="2000"/>
   <arg name="scene_yaml" />
-  <arg name="spawn_lanelet_id" default="2303321"/>
-  <arg name="spawn_s" default="0.0"/>
-  <arg name="vehicle_type" default="vehicle.mini.cooper_s_2021"/>
   <arg name="timeout_seconds" default="3600.0"/>
   <arg name="image_topic" default="/splatsim/image_raw"/>
   <arg name="camera_info_topic" default="/splatsim/camera_info"/>
   <arg name="frame_id" default="splatsim_camera"/>
 
-  <executable cmd="$(find-pkg-prefix splatsim)/lib/splatsim/spawn-scenario server.host=$(var carla_host) server.port=$(var carla_port) splatsim.scene_yaml=$(var scene_yaml) ego.spawn_lanelet_id=$(var spawn_lanelet_id) ego.spawn_s=$(var spawn_s) ego.vehicle_type=$(var vehicle_type) scenario.timeout_seconds=$(var timeout_seconds) splatsim.image_topic=$(var image_topic) splatsim.camera_info_topic=$(var camera_info_topic) splatsim.frame_id=$(var frame_id)" output="screen"/>
+  <executable cmd="$(find-pkg-prefix splatsim)/lib/splatsim/attach-scenario server.host=$(var carla_host) server.port=$(var carla_port) splatsim.scene_yaml=$(var scene_yaml) scenario.timeout_seconds=$(var timeout_seconds) splatsim.image_topic=$(var image_topic) splatsim.camera_info_topic=$(var camera_info_topic) splatsim.frame_id=$(var frame_id)" output="screen"/>
 </launch>

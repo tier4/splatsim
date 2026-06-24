@@ -1,15 +1,14 @@
-"""Entry point for the odaibatest spawn-only scenario.
+"""Entry point for the odaibatest attach-only scenario.
 
-Registers :class:`SpawnOnlyScenario` via the upstream scenario registry
+Registers :class:`AttachOnlyScenario` via the upstream scenario registry
 and delegates all orchestration to
 :func:`autoware_carla_scenario.examples.run.run_scenario`.
 
 Usage::
 
     source .env
-    uv run spawn-scenario
-    uv run spawn-scenario ego.spawn_lanelet_id=200 ego.spawn_s=10.0
-    uv run spawn-scenario scenario.timeout_seconds=60.0
+    uv run attach-scenario
+    uv run attach-scenario scenario.timeout_seconds=60.0
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ from autoware_carla_scenario.examples.run import build_ego_and_spawn, run_scenar
 
 from splatsim.carla_integration import SplatSimConfig
 
-from .spawn_only import SpawnOnlyConfig, SpawnOnlyScenario
+from .attach_only import AttachOnlyConfig, AttachOnlyScenario
 
 logger = logging.getLogger(__name__)
 
@@ -69,23 +68,21 @@ if _env_file is not None:
 def _build_scenario_from_cfg(
     cfg: DictConfig,
 ) -> tuple[EgoConfig, BaseScenario]:
-    """Build EgoConfig + SpawnOnlyScenario from the full Hydra config."""
-    ego, spawn_pose, ground_projection = build_ego_and_spawn(cfg)
+    """Build EgoConfig + AttachOnlyScenario from the full Hydra config."""
+    ego, _spawn_pose, _ground_projection = build_ego_and_spawn(cfg)
 
     scenario_raw = OmegaConf.to_container(cfg.scenario, resolve=True)
     assert isinstance(scenario_raw, dict)  # noqa: S101
-    config = SpawnOnlyConfig(**{str(k): v for k, v in scenario_raw.items()})
+    config = AttachOnlyConfig(**{str(k): v for k, v in scenario_raw.items()})
 
     splatsim_raw = OmegaConf.to_container(cfg.splatsim, resolve=True)
     assert isinstance(splatsim_raw, dict)  # noqa: S101
     splatsim_config = SplatSimConfig(**{str(k): v for k, v in splatsim_raw.items()})
 
-    return ego, SpawnOnlyScenario(
+    return ego, AttachOnlyScenario(
         ego,
         config=config,
         splatsim_config=splatsim_config,
-        spawn_pose=spawn_pose,
-        ground_projection=ground_projection,
     )
 
 

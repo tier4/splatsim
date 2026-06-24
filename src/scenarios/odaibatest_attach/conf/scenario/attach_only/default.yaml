@@ -1,0 +1,4 @@
+# @package _global_
+scenario:
+  name: attach_only
+  timeout_seconds: 3600.0
