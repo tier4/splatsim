@@ -26,6 +26,7 @@ class Renderer:
         near_plane: float = 0.01,
         far_plane: float = 1000.0,
         radius_clip: float = 0.0,
+        packed: bool = True,
         exposure: float = 1.0,
         ppisp_knn_k: int = 4,
     ) -> None:
@@ -37,6 +38,7 @@ class Renderer:
         self.exposure = float(exposure)
         self.ppisp_knn_k = int(ppisp_knn_k)
         self._radius_clip = radius_clip
+        self._packed = packed
         self._bg_color = torch.tensor(
             [list(background_color)], device=device, dtype=torch.float32
         )  # [1, 3] — shape [C, D] where C=num_cameras
@@ -102,7 +104,7 @@ class Renderer:
             far_plane=self.far_plane,
             radius_clip=self._radius_clip,
             render_mode="RGB",
-            packed=False,
+            packed=self._packed,
             backgrounds=self._bg_color,
         )
 
