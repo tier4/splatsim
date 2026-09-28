@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from splatsim._geometry import quat_xyzw_to_wxyz
+from splatsim.dataclass.actor_config import ActorConfig
 from splatsim.dataclass.lod_config import LodConfig
 from splatsim.dataclass.lidar_config import LidarConfig
 from splatsim.dataclass.renderer_config import RendererConfig
@@ -25,7 +27,7 @@ def _lidar_sensors_from_rigs(rigs) -> list[LidarConfig]:
         for cal in getattr(rig, "lidars", None) or []:
             ext = cal.extrinsics
             tx, ty, tz = (float(v) for v in ext.translation)
-            qx, qy, qz, qw = (float(v) for v in ext.rotation)  # xyzw
+            qw, qx, qy, qz = quat_xyzw_to_wxyz(ext.rotation)
             model = getattr(cal, "lidar_model", None)
             params = dict(model.parameters) if model is not None else {}
             elevation = params.get("elevation_deg")
@@ -59,6 +61,10 @@ class SceneConfig:
     background_usdz: str | None = None
     use_sh: bool = True
     rigid_bodies: list[RigidBodyConfig] = field(default_factory=list)
+    # Rigid dynamic objects spawned from the background bundle's actor asset
+    # bank (3dgs_io splatsim.actor_assets/v1). Empty by default: loading a
+    # scene does not place actors, a scenario does. See splatsim.actor_assets.
+    actors: list[ActorConfig] = field(default_factory=list)
     lidar_sensors: list[LidarConfig] = field(default_factory=list)
     renderer: RendererConfig = field(default_factory=RendererConfig)
     viewer: ViewerConfig = field(default_factory=ViewerConfig)
@@ -158,6 +164,7 @@ class SceneConfig:
             background_usdz=str(path),
             use_sh=True,
             rigid_bodies=[],
+            actors=[],
             lidar_sensors=lidar_sensors,
             renderer=renderer,
             viewer=viewer,

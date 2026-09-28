@@ -33,6 +33,12 @@ class Background:
         # The scene's ecef_anchor is the ENU world→ECEF transform.
         from splatsim._usdz import load_spz_scene
 
+        # Kept so consumers can re-open the same bundle for the sidecar data
+        # the background itself does not need — e.g. the rigid actor asset bank
+        # (see splatsim.actor_assets.ActorAssetLibrary).
+        self._source_path = path
+        self._use_sh = use_sh
+
         tensors, anchor = load_spz_scene(path, device, use_sh=use_sh)
         self._ecef_rotation = anchor[:3, :3].copy()
         self._ecef_translation = anchor[:3, 3].copy()
@@ -49,6 +55,16 @@ class Background:
             tensors, self._lod_index = lod_manager.precompute(tensors)
 
         self._tensors = tensors
+
+    @property
+    def source_path(self) -> Path:
+        """The scene USDZ this background was loaded from."""
+        return self._source_path
+
+    @property
+    def use_sh(self) -> bool:
+        """Whether view-dependent SH bands were kept when loading."""
+        return self._use_sh
 
     @property
     def lod_index(self) -> LodIndex | None:

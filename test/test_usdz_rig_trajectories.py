@@ -174,6 +174,109 @@ def test_load_spz_scene_reads_chunks_without_interpreting_tileset(
     np.testing.assert_allclose(ecef_anchor, anchor)
 
 
+def _scene_doc_v3(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema": "splatsim.scene/v3",
+        "world": {
+            "frame_convention": FRAME_CONVENTION,
+            "ecef_anchor": np.eye(4).tolist(),
+        },
+        "gaussians": {"frame": "world", "chunks": chunks},
+        "extras": {},
+    }
+
+
+def _real_spz_chunk(n: int = 4) -> bytes:
+    """Real NGSP v4 SPZ bytes for a tiny world-frame cloud."""
+    import tempfile
+
+    spz_mod = importlib.import_module("spz")
+    spz_io = importlib.import_module("3dgs_io.spz_io")
+    rng = np.random.default_rng(0)
+    gc = spz_mod.GaussianCloud()  # ty: ignore[unresolved-attribute]
+    gc.antialiased = False
+    gc.positions = rng.uniform(-5.0, 5.0, size=n * 3).astype(np.float32)
+    quats = rng.standard_normal((n, 4)).astype(np.float32)
+    quats /= np.linalg.norm(quats, axis=1, keepdims=True)
+    gc.rotations = quats.reshape(-1)
+    gc.scales = rng.uniform(-3.0, 0.0, size=n * 3).astype(np.float32)
+    gc.alphas = rng.standard_normal(n).astype(np.float32)
+    gc.colors = rng.uniform(0.0, 1.0, size=n * 3).astype(np.float32)
+    gc.sh_degree = 0
+    gc.sh = np.zeros(0, dtype=np.float32)
+    with tempfile.NamedTemporaryFile(suffix=".spz") as tmp:
+        spz_io.save_spz_world(gc, tmp.name)
+        return Path(tmp.name).read_bytes()
+
+
+def test_load_spz_scene_reads_v3_chunk_index(tmp_path) -> None:
+    """scene/v3: chunks come from the gaussians.chunks index, no sidecars."""
+    n = 4
+    chunk = _real_spz_chunk(n)
+    usdz_path = tmp_path / "scene.usdz"
+    scene = _scene_doc_v3([{"uri": "chunks/chunk_000000.spz", "n_points": n}])
+    with zipfile.ZipFile(usdz_path, "w") as zf:
+        zf.writestr("scene.json", json.dumps(scene))
+        zf.writestr("chunks/chunk_000000.spz", chunk)
+
+    tensors, anchor = _usdz.load_spz_scene(usdz_path, torch.device("cpu"))
+
+    assert tensors.means.shape == (n, 3)
+    assert tensors.intensity_raw is None
+    np.testing.assert_allclose(anchor, np.eye(4))
+
+
+def test_load_spz_scene_reads_v3_embedded_lidar_extension(tmp_path) -> None:
+    """scene/v3: LiDAR attrs ride inside the chunk SPZ as an extension record."""
+    n = 4
+    attrs = {
+        "lidar_intensity_raw": np.linspace(-1.0, 1.0, n).astype(np.float32),
+        "lidar_raydrop_logit": np.full(n, -0.5, dtype=np.float32),
+        "lidar_mask": np.array([1.0, 0.0, 1.0, 1.0], dtype=np.float32),
+    }
+    chunk = _3dgs_io.embed_lidar_extension(_real_spz_chunk(n), attrs, count=n)
+    usdz_path = tmp_path / "scene.usdz"
+    scene = _scene_doc_v3([{"uri": "chunks/chunk_000000.spz", "n_points": n}])
+    scene["gaussians"]["ext_attributes"] = {
+        "extension": "EXT_gaussian_lidar",
+        "container": "spz_extension",
+        "spz_extension_type": "0x54340001",
+        "attributes": sorted(attrs),
+    }
+    with zipfile.ZipFile(usdz_path, "w") as zf:
+        zf.writestr("scene.json", json.dumps(scene))
+        zf.writestr("chunks/chunk_000000.spz", chunk)
+
+    tensors, _anchor = _usdz.load_spz_scene(usdz_path, torch.device("cpu"))
+
+    assert tensors.intensity_raw is not None
+    assert tensors.raydrop_logit is not None
+    torch.testing.assert_close(
+        tensors.raydrop_logit, torch.full((n,), -0.5), atol=0.02, rtol=0
+    )
+    assert tensors.lidar_mask is not None
+    assert tensors.lidar_mask.tolist() == [True, False, True, True]
+
+
+def test_load_spz_scene_v3_requires_extension_record(tmp_path) -> None:
+    """A v3 bundle declaring LiDAR attrs must embed them in every chunk."""
+    n = 4
+    chunk = _real_spz_chunk(n)  # no extension record
+    usdz_path = tmp_path / "scene.usdz"
+    scene = _scene_doc_v3([{"uri": "chunks/chunk_000000.spz", "n_points": n}])
+    scene["gaussians"]["ext_attributes"] = {
+        "extension": "EXT_gaussian_lidar",
+        "container": "spz_extension",
+        "attributes": ["lidar_intensity_raw", "lidar_raydrop_logit"],
+    }
+    with zipfile.ZipFile(usdz_path, "w") as zf:
+        zf.writestr("scene.json", json.dumps(scene))
+        zf.writestr("chunks/chunk_000000.spz", chunk)
+
+    with pytest.raises(ValueError, match="missing its LiDAR extension record"):
+        _usdz.load_spz_scene(usdz_path, torch.device("cpu"))
+
+
 def test_load_spz_scene_restores_lidar_sidecars(tmp_path, monkeypatch) -> None:
     usdz_path = tmp_path / "scene.usdz"
     scene = _scene_doc()
@@ -182,7 +285,7 @@ def test_load_spz_scene_restores_lidar_sidecars(tmp_path, monkeypatch) -> None:
         "sidecar_suffix": ".lidar",
         "attributes": ["lidar_intensity_raw", "lidar_raydrop_logit"],
     }
-    sidecar = _3dgs_io.encode_lidar_sidecar(
+    sidecar = _3dgs_io.encode_lidar_extension(
         {
             "lidar_intensity_raw": np.array([0.0], dtype=np.float32),
             "lidar_raydrop_logit": np.array([-1.0], dtype=np.float32),

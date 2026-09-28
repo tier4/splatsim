@@ -9,11 +9,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from splatsim._conversions import (
-    GaussianTensors,
-    apply_rigid_transform,
-    quat_to_rotation_matrix,
-)
+from splatsim._conversions import GaussianTensors, quat_to_rotation_matrix
+from splatsim.actor_assets import ActorAssetLibrary
 from splatsim.background import Background
 from splatsim.dataclass import SceneConfig
 from splatsim.lod import LodIndex, LodManager
@@ -42,12 +39,17 @@ class Scene:
         rigid_bodies: dict[str, RigidBody] | None = None,
         lod_manager: LodManager | None = None,
         ppisp_tables: "PpispTables | None" = None,
+        actor_library: "ActorAssetLibrary | None" = None,
     ) -> None:
         self.background = background
         self._rigid_bodies: dict[str, RigidBody] = rigid_bodies or {}
         self._lod_manager = lod_manager
         self._lod_enabled = lod_manager is not None
         self.ppisp_tables = ppisp_tables
+        self._actor_library = actor_library
+        # An optional equirect sky panorama (see _usdz.load_skybox); the Renderer
+        # samples it by ray direction behind the Gaussians.
+        self.skybox: Tensor | None = None
 
     # --- rigid body access ---------------------------------------------------
 
@@ -63,10 +65,105 @@ class Scene:
 
     @property
     def rigid_body_list(self) -> list[RigidBody]:
+        """The bodies in the scene, as a snapshot.
+
+        Gathers and the viewer iterate this rather than the live dict, so a
+        body added or removed while one is running lands in the next frame
+        instead of raising mid-iteration.
+        """
         return list(self._rigid_bodies.values())
 
     def add_rigid_body(self, name: str, rigid_body: RigidBody) -> None:
+        """Add a body to the scene, refusing one a gather could not pack.
+
+        A gather concatenates the colour block of every source it collects
+        (see :func:`splatsim.renderer._pack`), so a body whose colours are
+        shaped differently from what the scene already holds — an SH object in
+        a scene loaded without SH, or two different SH degrees — would abort a
+        render thread mid-frame with a bare ``torch.cat`` error. Every spawn
+        path funnels through here, which makes this the one place to turn that
+        into something the caller can still act on.
+        """
+        mismatch = self._colors_mismatch(rigid_body)
+        if mismatch is not None:
+            raise ValueError(f"{name}: {mismatch}")
         self._rigid_bodies[name] = rigid_body
+
+    def _colors_mismatch(self, rigid_body: RigidBody) -> str | None:
+        """Why *rigid_body* could not be concatenated with this scene, if so."""
+        if self.background is not None:
+            held = self.background.tensors
+        elif self._rigid_bodies:
+            held = next(iter(self._rigid_bodies.values())).base_tensors
+        else:
+            return None
+        colors = rigid_body.base_tensors.colors
+        if held.colors.shape[1:] == colors.shape[1:]:
+            return None
+        return (
+            f"colours {tuple(colors.shape[1:])} (SH degree "
+            f"{rigid_body.base_tensors.sh_degree}) cannot be rendered together "
+            f"with the scene's {tuple(held.colors.shape[1:])} (SH degree "
+            f"{held.sh_degree})"
+        )
+
+    @property
+    def actor_library(self) -> ActorAssetLibrary | None:
+        """The background bundle's rigid actor assets, if it ships any.
+
+        ``None`` until something loads it — :meth:`from_config` does so when
+        the config lists actors, and :meth:`ensure_actor_library` (which
+        :meth:`spawn_actor` goes through) on demand.
+        """
+        return self._actor_library
+
+    def ensure_actor_library(self) -> ActorAssetLibrary:
+        """Return the bundle's actor asset bank, loading it on first use.
+
+        :meth:`spawn_actor` goes through here; so does anything that only wants
+        to *look* at what the bundle ships (the gRPC ``ListActorAssets``
+        handler) without spawning anything. Raises when there is no background
+        USDZ to read a bank from, or when that bundle carries none.
+        """
+        if self._actor_library is None:
+            if self.background is None:
+                raise ValueError(
+                    "no actor asset bank loaded and no background USDZ to load one from"
+                )
+            self._actor_library = ActorAssetLibrary(
+                self.background.source_path,
+                device=self.background.tile_local_centroid.device,
+                use_sh=self.background.use_sh,
+                lod_manager=self._lod_manager,
+            )
+        return self._actor_library
+
+    def spawn_actor(
+        self,
+        asset_id: str,
+        name: str,
+        *,
+        position: tuple[float, float, float] | Tensor | None = None,
+        rotation: tuple[float, float, float, float] | Tensor | None = None,
+        world_position: bool = True,
+    ) -> RigidBody:
+        """Add a rigid dynamic object from the bundle's actor asset bank.
+
+        The scenario owns the pose from here on: call
+        :meth:`set_pose` with ``name`` each frame. ``position`` is read in the
+        bundle's ENU world frame unless ``world_position`` is ``False``;
+        ``rotation`` is ``wxyz``.
+        """
+        if name in self._rigid_bodies:
+            raise ValueError(f"a rigid body named {name!r} is already in the scene")
+        body = self.ensure_actor_library().spawn(
+            asset_id,
+            position=position,
+            rotation=rotation,
+            background=self.background if world_position else None,
+        )
+        self.add_rigid_body(name, body)
+        return body
 
     def remove_rigid_body(self, name: str) -> RigidBody:
         return self._rigid_bodies.pop(name)
@@ -97,12 +194,30 @@ class Scene:
         return self._lod_manager
 
     def collect_tensors(
-        self, camera_position: Tensor | None = None
+        self,
+        camera_position: Tensor | None = None,
+        lod_count_scale: float = 1.0,
+        lidar_view: bool = False,
+        lod_max_distance: float | None = None,
     ) -> list[GaussianTensors]:
         """Collect Gaussian tensors from all sources, applying LOD if enabled.
 
         Args:
-            camera_position: [3] float32 GPU tensor, or None to skip LOD.
+            camera_position: ``[3]`` float32 GPU tensor (or ``[S, 3]`` for a
+                rig — see :meth:`LodManager.filter`), or None to skip LOD.
+            lod_count_scale: Extra per-cell LOD decimation (``<1`` thins every
+                cell further; forwarded to :meth:`LodManager.filter`). Used by
+                the LiDAR renderer to cap Gaussian count on 360° scenes that the
+                camera-tuned tiers leave too dense. ``1.0`` = camera behaviour.
+            lidar_view: Forwarded to :meth:`LodManager.filter`: fuse the static
+                ``lidar_mask`` into the LOD gather and skip the (LiDAR-unused)
+                colors block. Only affects sources that go through the LOD
+                filter; unfiltered sources come back unchanged and the caller's
+                own ``lidar_mask`` handling still applies to them.
+            lod_max_distance: Forwarded to :meth:`LodManager.filter` as
+                ``max_distance`` — whole cells provably beyond this camera
+                distance are dropped before the gather (see there for the
+                exactness argument).
         """
         result: list[GaussianTensors] = []
         can_filter = (
@@ -119,23 +234,34 @@ class Scene:
                     self.background.tensors,
                     self.background.lod_index,
                     camera_position,
+                    count_scale=lod_count_scale,
+                    lidar_view=lidar_view,
+                    max_distance=lod_max_distance,
                 )
             else:
                 tensors = self.background.tensors
             result.append(tensors)
 
-        for rb in self._rigid_bodies.values():
+        for rb in self.rigid_body_list:  # a snapshot; see the property
             if can_filter and rb.lod_index is not None:
                 assert self._lod_manager is not None  # noqa: S101
                 assert camera_position is not None  # noqa: S101
                 # Transform camera position into the rigid body's local frame
                 # so that octree cell distances are computed correctly.
                 rot_mat = quat_to_rotation_matrix(rb.rotation)  # [3, 3]
-                cam_local = rot_mat.T @ (camera_position - rb.position)
+                # Works for a single [3] position and for a rig's [S, 3].
+                cam_local = (camera_position.reshape(-1, 3) - rb.position) @ rot_mat
+                if camera_position.dim() == 1:
+                    cam_local = cam_local.reshape(3)
                 base = self._lod_manager.filter(
-                    rb.base_tensors, rb.lod_index, cam_local
+                    rb.base_tensors,
+                    rb.lod_index,
+                    cam_local,
+                    count_scale=lod_count_scale,
+                    lidar_view=lidar_view,
+                    max_distance=lod_max_distance,
                 )
-                tensors = apply_rigid_transform(base, rb.position, rb.rotation)
+                tensors = rb.posed(base)
             else:
                 tensors = rb.tensors
             result.append(tensors)
@@ -164,7 +290,7 @@ class Scene:
             device = torch.device(config.renderer.device)
 
         has_bg = config.background_usdz is not None
-        total = int(has_bg) + len(config.rigid_bodies)
+        total = int(has_bg) + len(config.rigid_bodies) + len(config.actors)
         step = 0
 
         lod_manager: LodManager | None = None
@@ -196,6 +322,12 @@ class Scene:
                     centroid=background.tile_local_centroid,
                 )
 
+        if config.actors and background is None:
+            raise ValueError(
+                "scene config lists actors but has no background_usdz to load "
+                "the actor asset bank from"
+            )
+
         rigid_bodies: dict[str, RigidBody] = {}
         for rb_cfg in config.rigid_bodies:
             rb = RigidBody(
@@ -212,12 +344,37 @@ class Scene:
             if rb.lod_index is not None:
                 _log_lod_tiers(rb_cfg.name, rb.lod_index)
 
-        return Scene(
+        scene = Scene(
             background=background,
             rigid_bodies=rigid_bodies,
             lod_manager=lod_manager,
             ppisp_tables=ppisp_tables,
         )
+        if config.background_usdz is not None:
+            from splatsim._usdz import load_skybox
+
+            scene.skybox = load_skybox(config.background_usdz, device)
+            if scene.skybox is not None:
+                h, w = int(scene.skybox.shape[0]), int(scene.skybox.shape[1])
+                if progress is not None:
+                    progress(step, total, f"skybox {w}x{h}")
+
+        # Configured actors go through the same entry point a scenario uses, so
+        # the bank is loaded once, on first spawn, and the name-collision rule
+        # has one definition.
+        for actor_cfg in config.actors:
+            scene.spawn_actor(
+                actor_cfg.asset_id,
+                actor_cfg.name,
+                position=actor_cfg.position,
+                rotation=actor_cfg.rotation,
+                world_position=actor_cfg.world_position,
+            )
+            step += 1
+            if progress is not None:
+                progress(step, total, actor_cfg.name)
+
+        return scene
 
 
 def _log_lod_tiers(name: str, lod_index: LodIndex) -> None:

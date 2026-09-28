@@ -53,6 +53,11 @@ class PoseBuffer:
         with self._lock:
             return self._poses[-1] if self._poses else None
 
+    def get_earliest(self) -> TimestampedPose | None:
+        """Return the oldest buffered pose, or ``None``."""
+        with self._lock:
+            return self._poses[0] if self._poses else None
+
     def trim_before(self, time_ns: int) -> None:
         """Remove poses older than *time_ns*, keeping one for interpolation."""
         with self._lock:

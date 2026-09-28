@@ -1,6 +1,6 @@
 [project]
 name = "splatsim"
-version = "1.10.0"
+version = "1.13.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -20,6 +20,12 @@ dependencies = [
     "protobuf>=4.25.0",
     "grpcio-tools>=1.60.0",
     "packaging",
+    # SplatAD spherical LiDAR rasterizer, now its own package rather than a copy
+    # in-tree (see [tool.uv.sources]). It JIT-builds its CUDA extension on first
+    # use, so it needs the same nvcc gsplat's build does.
+    "splatad-kernel",
+    "rich",
+    "typing_extensions",
 ]
 
 [project.optional-dependencies]
@@ -29,13 +35,6 @@ gui = [
 dds = [
     "cyclonedds>=11.0.1",
     "opencv-python-headless>=4.0.0",
-]
-carla = [
-    "autoware-carla-scenario[carla-0-9-16]",
-    "autoware-lanelet2-to-opendrive",
-    "cyclonedds>=11.0.1",
-    "python-dotenv>=1.0.0",
-    "pyproj>=3.7.1",
 ]
 # Ground-truth LiDAR evaluation (src/eval, run as `python -m eval.eval_lidar`).
 # Pulls a local WebAuto / T4 dataset via t4-devkit for the GT trajectory + GT
@@ -68,7 +67,7 @@ bev = [
     "spconv-cu126>=2.3,<2.4",
 ]
 all = [
-    "splatsim[gui,carla]",
+    "splatsim[gui]",
 ]
 
 [tool.uv]
@@ -91,6 +90,15 @@ build-constraint-dependencies = ["torch>=2.7,<2.8"]
 [tool.uv.extra-build-dependencies]
 ppisp = ["torch"]
 
+# spz v3.0.0 (pulled transitively via 3dgs-io v2.0.0, needed to read the NGSP
+# v4 chunks of scene/v3 bundles): force spz's CMake down the FetchContent path
+# for zstd — distro zstd CMake configs (e.g. Ubuntu 24.04) expose a non-PIC
+# libzstd.a that cannot be linked into the Python shared module. Mirrors the
+# same setting in 3dgs_io's own pyproject (uv does not propagate it from a git
+# dependency).
+[tool.uv.extra-build-variables]
+spz = { CMAKE_ARGS = "-DCMAKE_DISABLE_FIND_PACKAGE_zstd=TRUE" }
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -105,19 +113,25 @@ torchvision = [
   { index = "pytorch-cu128" },
 ]
 
-# 3dgs_io v1.2.0: adds an optional view-dependent (SH) per-Gaussian raydrop
-# trailing block to the EXT_gaussian_lidar sidecar (version-2 sidecar;
-# decode_lidar_sidecar may now return a "raydrop_sh" (N, (deg+1)**2-1) float32
-# array of the higher-order SH bands — the DC term stays in
-# lidar_raydrop_logit; absent for version-1 sidecars). v1.1.0 added the optional
-# per-Gaussian `lidar_mask` channel (decode_lidar_sidecar may return a
-# "lidar_mask" (N,) float32 array in {0,1}; 1 = participates in LiDAR /
-# near-field, 0 = appearance-only / far-field; absent for old 2-channel
-# sidecars). v1.0.0 was the first tagged release with the frame-explicit v2
-# scene USDZ work (issue #39). Only the scene USDZ readers (load_spz,
-# decode_lidar_sidecar, parse_rig_trajectories, ...) are used; splatsim no
-# longer loads 3D Tiles tilesets.
-3dgs-io = { git = "https://github.com/autowarefoundation/3dgs_io.git", tag = "v1.2.0" }
+# 3dgs_io v2.1.0 adds splatsim.actor_assets/v1: rigid dynamic-object ("actor")
+# assets carried in a scene USDZ as actor_assets.json plus one object-local
+# NGSP v4 SPZ per asset (parse_actor_assets / decode_actor_asset). The payload
+# is the same container the background chunks use, so an actor's Gaussians and
+# its per-Gaussian LiDAR attributes come through the readers splatsim already
+# has. See splatsim/actor_assets.py.
+#
+# v2.0.1 (splatsim.scene/v3): per-Gaussian LiDAR attributes ride
+# inside each chunk SPZ as an NGSP v4 extension record (extract_lidar_extension)
+# instead of `.lidar` sidecar files, the chunk index lives in
+# scene.json.gaussians.chunks, and bundles carry no Cesium tileset.json.
+# decode_lidar_sidecar was renamed decode_lidar_extension (payload format
+# unchanged: lidar_intensity_raw / lidar_raydrop_logit, optional lidar_mask
+# channel from v1.1.0, optional raydrop_sh trailing block from v1.2.0).
+# splatsim keeps reading v2 (sidecar) bundles through the same renamed decoder.
+# Only the scene USDZ readers (load_spz, decode_lidar_extension,
+# extract_lidar_extension, parse_actor_assets, parse_rig_trajectories, ...)
+# are used.
+3dgs-io = { git = "https://github.com/autowarefoundation/3dgs_io.git", tag = "v2.1.0" }
 
 # t4-devkit: WebAuto / T4 dataset devkit, used by the optional 'eval' extra to
 # pull the GT ego trajectory + GT LiDAR scans. Not published to PyPI; pin to the
@@ -129,12 +143,21 @@ t4-devkit = { git = "https://github.com/tier4/t4-devkit.git", tag = "v0.7.1" }
 # (`ppisp_cuda`) built via torch.utils.cpp_extension.CUDAExtension.
 ppisp = { git = "https://github.com/nv-tlabs/ppisp.git", rev = "df33809f7b3b20ac06de088dfc871b144b8fb54d" }
 
+# SplatAD LiDAR rasterizer, extracted from the former src/splatsim/splatad_lidar
+# into its own repo so the kernel can be developed and versioned separately.
+# Not on PyPI, so pinned to a rev. Its CUDA extension JIT-builds at import time
+# exactly as the in-tree copy did, so the nvcc requirement is unchanged; the
+# extension is named splatad_kernel_cuda and does not collide with gsplat's.
+# It compiles against the gsplat pinned below (its Utils.cuh/Common.h and the
+# glm headers it ships), so the two move together: bumping gsplat means
+# rebuilding the kernel, which the JIT does automatically.
+splatad-kernel = { git = "https://github.com/hakuturu583/splatad_kernel.git", rev = "ee56a486941d80c60fceaa95b7fb0fc20b658838" }
+
 # gsplat main pinned past PR #890 (Add LiDAR sensor support) to enable
 # camera_model="lidar" rasterization via RowOffsetStructuredSpinningLidarModelParameters.
 # Rev tracks the pin used by tier4/gaussian_factory.
 gsplat = { git = "https://github.com/nerfstudio-project/gsplat.git", rev = "4e52698e45eaaed929ed3a5065e96a688d085df6" }
 
-autoware-carla-scenario = { git = "https://github.com/tier4/autoware_lanelet2_to_opendrive.git", rev = "348108571cf4abec1f668ca0999753b75b8a5e4b", subdirectory = "autoware_carla_scenario" }
 autoware-lanelet2-to-opendrive = { git = "https://github.com/tier4/autoware_lanelet2_to_opendrive.git", rev = "348108571cf4abec1f668ca0999753b75b8a5e4b", subdirectory = "autoware_lanelet2_to_opendrive" }
 lanelet2-python-api-for-autoware = { git = "https://github.com/tier4/lanelet2_python_api_for_autoware", rev = "21cafbf9a855afbc4b89d4dfc3d299a411b64dde" }
 
@@ -150,11 +173,12 @@ dev = [
 
 [project.scripts]
 splatsim-viewer = "splatsim.viewer:main"
-spawn-scenario = "scenarios.odaibatest_spawn.run:main"
 splatsim-grpc-server = "splatsim.grpc_service.cli:main"
 
 [tool.ruff]
-exclude = ["src/splatsim/grpc_service/_generated"]
+exclude = [
+    "src/splatsim/grpc_service/_generated",
+]
 
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10.0"]
@@ -176,19 +200,42 @@ include = ["launch/**"]
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"
 
-# scenarios also imports ament_index_python (ROS 2 only, not pip-installable).
+# scenarios also imports ament_index_python (ROS 2 only, not pip-installable)
+# and autoware_carla_scenario, whose sensor-config dataclasses it constructs by
+# keyword — invisible base classes, so the same unknown-argument cascade as the
+# carla_integration block below.
 [[tool.ty.overrides]]
 include = ["src/scenarios/**"]
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"
+unknown-argument = "ignore"
 
 # Generated protobuf/gRPC stubs are produced at build time and gitignored,
 # so they are absent during CI type-checking. This also covers tests that
 # import those stubs (e.g. test_grpc_lod.py's rendering_service_pb2 import).
 [[tool.ty.overrides]]
-include = ["src/splatsim/grpc_service/**", "test/test_grpc_lod.py"]
+include = [
+    "src/splatsim/grpc_service/**",
+    "test/test_grpc_lod.py",
+    "test/test_grpc_pose_stream.py",
+    "test/test_grpc_actors.py",
+]
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"
+
+# The CARLA integration imports `carla` and `autoware_carla_scenario`, neither of
+# which is pip-installable, so the whole subtree is unresolvable in CI. Beyond the
+# imports themselves this hides base classes: SplatSimLidarSensorConfig is a
+# dataclass deriving from autoware_carla_scenario's LidarSensorConfig, so ty
+# synthesises __init__ from the visible fields only and reports every inherited
+# field as an unknown argument. The same blindness makes the module's existing
+# suppressions look unused.
+[[tool.ty.overrides]]
+include = ["src/splatsim/carla_integration/**"]
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+unknown-argument = "ignore"
+unused-ignore-comment = "ignore"
 
 # The LiDAR eval script depends on the optional `eval` extra (t4-devkit,
 # rerun-sdk), which is not installed in the default/CI environment.

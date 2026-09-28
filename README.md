@@ -110,6 +110,140 @@ splatsim-viewer scene.usdz --lidar top --dds
 spawn-scenario
 ```
 
+## Dynamic objects (actor assets)
+
+A scene USDZ built with 3dgs_io >= v2.1.0 can carry a bank of **rigid
+dynamic-object assets** (`splatsim.actor_assets/v1`): cars, trucks, trailers,
+cones — anything whose shape does not change over time. Each is a Gaussian
+cloud authored in a canonical object-local frame (`+x` forward, `+y` left,
+`+z` up, origin at the box centre, metric scale), in the same SPZ container the
+background chunks use, so an actor's Gaussians and its per-Gaussian LiDAR
+attributes go through the readers splatsim already has.
+
+**Poses come from outside.** splatsim hands you a `RigidBody` per instance and
+the scenario drives it — a CARLA bridge, a scenario runner, the gRPC service.
+The bundle's own `sequence_tracks.json` is metadata here, exposed for callers
+that want to replay it, not a playback engine.
+
+```python
+from splatsim import Scene
+from splatsim.actor_assets import pose_from_track_frame
+
+scene = Scene.from_config("scene.usdz")
+
+# What the bundle ships
+library = scene.actor_library
+print(library.asset_ids, library.info("sedan_0007").size)
+
+# Spawn as many instances as the scenario needs — they share one upload
+scene.spawn_actor("sedan_0007", name="car_01", position=(113.6, -58.5, 1.9))
+scene.spawn_actor("sedan_0007", name="car_02", position=(120.0, -58.5, 1.9))
+
+# ...then drive them
+scene.set_pose("car_01", (114.1, -58.5, 1.9), (0.966, 0.0, 0.0, 0.259))
+```
+
+Two conventions worth getting right, both handled for you if you use the
+helpers:
+
+- **Frame.** `Background` re-centres the scene on its own Gaussian centroid for
+  numerical stability, so an ENU world-frame pose (a track pose, a map
+  waypoint) must have that centroid subtracted. `spawn_actor` /
+  `ActorAssetLibrary.spawn` do this by default; pass `world_position=False`
+  when your pose is already tile-local.
+- **Quaternion order.** Everything inside a scene bundle is `xyzw`; every
+  splatsim pose is `wxyz`. Route bundle poses through
+  `splatsim.actor_assets.pose_from_track_frame`.
+
+### Over gRPC
+
+The rendering service places and drives the same objects, so a client that
+already streams sensor poses does not need a second channel for the traffic
+around them:
+
+```python
+stub.Initialize(pb2.InitializeRequest(scene_path="scene.usdz", ...))
+
+# What the bundle ships
+for asset in stub.ListActorAssets(pb2.ListActorAssetsRequest()).assets:
+    print(asset.asset_id, asset.class_name, asset.size)
+
+stub.SpawnActor(pb2.SpawnActorRequest(
+    instance_id="car_01",
+    asset_id="sedan_0007",          # or asset_path="/data/sedan.spz"
+    pose=pb2.Pose(position=..., rotation=...),
+))
+
+def poses():
+    for stamp, ego, actors in scenario:
+        yield pb2.RigData(
+            stamp=stamp,
+            pose=ego,
+            actors=[pb2.ActorPose(instance_id="car_01", pose=actors["car_01"])],
+        )
+
+stub.StreamRigData(poses())
+```
+
+`actors` rides on the pose messages of all three streams (`StreamCameraData`,
+`StreamLidarData`, `StreamRigData`). The newest poses the stream has delivered
+are applied to the scene right before the frame is rendered — so a frame's
+objects are as fresh as its ego pose, and on a rig every sensor sees them at one
+instant. Leaving `actors` out of a message keeps the previous poses, so a client
+may move objects at a lower rate than it streams poses (the server then skips
+the update entirely rather than re-uploading unchanged poses).
+
+Two differences from the Python API, both because the wire is not the scenario:
+
+- **Frame.** Camera / LiDAR / rig poses are streamed tile-local, so actors
+  default to the same frame rather than to the world frame `spawn_actor` uses.
+  Set `world_frame` on `SpawnActor` to send ENU world coordinates and have the
+  server subtract the origin it reported in `InitializeResponse.scene_origin`;
+  the choice is fixed per instance and applies to every `ActorPose` after it.
+- **Zero quaternions.** proto3 has no unset scalar, so an all-zero `rotation`
+  means "keep the current one" rather than collapsing the object — fill it in
+  only when you mean to turn something.
+
+`SpawnActor` also takes an `asset_path` to a standalone `.spz` / `.ply` /
+`.glb`, for scenes whose bundle ships no bank; instances of one path share a
+single upload, as bank assets do. `RemoveActor` takes an object back out — it
+is gone from the next frame.
+
+### View-dependent bands, camera and LiDAR
+
+Actors re-express **both** their view-dependent band sets when posed, unlike the
+pre-existing `RigidBodyConfig` bodies:
+
+- **colour SH** — leaving the specular bands in the object frame makes
+  highlights spin with the car;
+- **`raydrop_sh`** — the LiDAR renderer evaluates drop probability along the
+  world-space sensor→Gaussian ray, so unrotated bands sample a car facing east
+  with the pattern it had facing north. The scalar `raydrop_logit` is the
+  band-0 term and is rotation-invariant, so it needs nothing.
+
+Both go through the same closed-form `+Z` rotation off a single yaw, which is
+exact for the yaw-only poses road vehicles have.
+`RigidBody.sh_rotation_tilt` / `.sh_rotation_is_exact` report when a pose is
+tilted far enough out of the ground plane for it to be an approximation.
+
+Everything else on the LiDAR path already treats an actor like any other
+source: `lidar_mask` is applied per-source before the scene concat (so an asset
+without one participates fully), assets that carry no raydrop bands are
+zero-padded to the scene's SH width and contribute only their scalar logit, and
+the LOD `lidar_view` gather thins the actor's object-frame Gaussians before the
+pose is applied.
+
+Actors can also be declared in a scene config, for static props and spawn
+points:
+
+```yaml
+actors:
+  - asset_id: sedan_0007
+    name: parked_car
+    position: [113.62, -58.55, 1.92]   # ENU world frame
+    rotation: [0.966, 0.0, 0.0, 0.259] # wxyz
+```
+
 ## LiDAR transport (DDS vs. HILS)
 
 Each LiDAR sensor in a scene renders a point cloud that can be delivered two ways,

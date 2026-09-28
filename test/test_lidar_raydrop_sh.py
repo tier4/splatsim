@@ -141,7 +141,7 @@ def _scene_doc() -> dict:
 
 def _write_scene(tmp_path, attrs: dict, count: int):
     usdz_path = tmp_path / "scene.usdz"
-    sidecar = _3dgs_io.encode_lidar_sidecar(attrs, count=count)
+    sidecar = _3dgs_io.encode_lidar_extension(attrs, count=count)
     with zipfile.ZipFile(usdz_path, "w") as zf:
         zf.writestr("scene.json", json.dumps(_scene_doc()))
         zf.writestr("chunks/chunk_000000.spz", b"spz")
@@ -245,7 +245,9 @@ class _FakeScene:
     def __init__(self, tensors: GaussianTensors) -> None:
         self._tensors = tensors
 
-    def collect_tensors(self, _cam_pos):  # noqa: D401 - signature match
+    def collect_tensors(self, _cam_pos, **_kwargs):  # noqa: D401 - signature match
+        # LOD / lidar-view kwargs (lod_count_scale, lidar_view, lod_max_distance)
+        # are accepted and ignored: this fake has no LOD index to filter.
         return [self._tensors]
 
 

@@ -61,6 +61,13 @@ RUN mkdir -p "${TORCH_EXTENSIONS_DIR}" \
 # `.so` here and let ``_lidar_cull_ext._load_prebuilt`` pick it up at runtime).
 RUN uv run python -c "from splatsim._lidar_cull_ext import _try_load; assert _try_load() is not None, 'splatsim CUDA cull JIT compilation failed'"
 
+# Pre-compile the SplatAD spherical LiDAR rasterizer (splatad_kernel) as well --
+# it is the sole LiDAR rasterization backend, with no gsplat fallback, and it
+# JIT-builds on first import. Same reasoning as above: build the
+# `splatad_kernel_cuda` .so here so the nvcc-less runtime image loads it from
+# TORCH_EXTENSIONS_DIR.
+RUN uv run python -c "from splatad_kernel.cuda._backend import _C; assert _C is not None, 'SplatAD LiDAR CUDA JIT compilation failed'"
+
 # Patch gsplat _backend.py so it can load the pre-compiled .so without nvcc.
 # The upstream code gates on cuda_toolkit_available() which requires nvcc even
 # when a compiled extension already exists.  This patch adds a fallback that

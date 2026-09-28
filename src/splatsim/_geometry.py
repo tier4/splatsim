@@ -53,6 +53,18 @@ def _from_xyzw(q_xyzw: np.ndarray, order: QuatOrder) -> np.ndarray:
     return q_xyzw[[3, 0, 1, 2]]  # -> wxyz
 
 
+def quat_xyzw_to_wxyz(q_xyzw: Vec) -> tuple[float, float, float, float]:
+    """Reorder an ``xyzw`` quaternion to ``wxyz``.
+
+    Scene bundles (track poses, rig poses, sensor extrinsics) are ``xyzw``;
+    every splatsim pose is ``wxyz``. Reordering by hand is silent when it goes
+    wrong — the result is still a unit quaternion, just the wrong rotation — so
+    the conversion lives here with the rest of the frame plumbing.
+    """
+    x, y, z, w = (float(v) for v in q_xyzw)
+    return (w, x, y, z)
+
+
 def quat_to_matrix(q: Vec, *, order: QuatOrder = "wxyz") -> np.ndarray:
     """Convert a quaternion to a 3x3 rotation matrix (float64).
 

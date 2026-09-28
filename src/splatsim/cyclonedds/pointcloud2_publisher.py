@@ -109,6 +109,42 @@ class PointCloud2Publisher:
         )
         self._writer.write(msg)
 
+    def publish_packed(
+        self,
+        records: NDArray[np.uint8],
+        count: int,
+        *,
+        stamp: Time,
+    ) -> None:
+        """Publish pre-packed point records (fast path).
+
+        Args:
+            records: ``(count * 16,)`` uint8 buffer already laid out in this
+                publisher's point record format (x, y, z float32 little-endian |
+                intensity uint8 | return_type uint8 | channel uint16), e.g. from
+                :meth:`splatsim.lidar_renderer.LidarRenderer.panorama_to_pointcloud2_data`.
+                Skips the per-frame CPU re-packing of xyz / intensity / channel.
+            count: Number of points in ``records``.
+            stamp: ROS 2 timestamp for the frame.
+        """
+        if records.size != count * _POINT_STEP:
+            raise ValueError(
+                f"records must be (count * {_POINT_STEP},) uint8; "
+                f"got {records.size} bytes for {count} points"
+            )
+        msg = PointCloud2(
+            header=Header(stamp=stamp, frame_id=self._frame_id),
+            height=1,
+            width=count,
+            fields=list(_POINT_FIELDS),
+            is_bigendian=False,
+            point_step=_POINT_STEP,
+            row_step=_POINT_STEP * count,
+            data=records.tobytes(),
+            is_dense=False,
+        )
+        self._writer.write(msg)
+
 
 def _make_pointcloud2_message(
     xyz: NDArray[np.float32],

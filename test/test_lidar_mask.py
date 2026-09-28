@@ -118,7 +118,7 @@ def _scene_doc() -> dict:
 
 def _write_scene(tmp_path, attrs: dict, count: int):
     usdz_path = tmp_path / "scene.usdz"
-    sidecar = _3dgs_io.encode_lidar_sidecar(attrs, count=count)
+    sidecar = _3dgs_io.encode_lidar_extension(attrs, count=count)
     with zipfile.ZipFile(usdz_path, "w") as zf:
         zf.writestr("scene.json", json.dumps(_scene_doc()))
         zf.writestr("chunks/chunk_000000.spz", b"spz")
@@ -191,7 +191,13 @@ class _FakeScene:
     def __init__(self, tensors: GaussianTensors) -> None:
         self._tensors = tensors
 
-    def collect_tensors(self, _cam_pos):  # noqa: D401 - signature match
+    def collect_tensors(  # noqa: D401 - signature match
+        self,
+        _cam_pos,
+        lod_count_scale: float = 1.0,
+        lidar_view: bool = False,
+        lod_max_distance: float | None = None,
+    ):
         return [self._tensors]
 
 

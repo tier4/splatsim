@@ -29,6 +29,19 @@ _EXT_LOAD_ERROR: Optional[BaseException] = None
 
 _SRC_PATH = Path(__file__).resolve().parent / "csrc" / "lidar_cull_kernel.cu"
 
+# Every binding the current kernel source exports. A pre-built ``.so`` missing
+# any of these is STALE (built from an older lidar_cull_kernel.cu) and must not
+# be used: callers probe with hasattr and silently fall back to a many-times
+# slower PyTorch path, so a stale binary costs milliseconds per frame while
+# looking perfectly healthy (observed: an .so predating raydrop_sh_eval kept
+# the 5-sensor rig on the gsplat fallback at ~15 ms/frame vs ~2 ms).
+_EXPECTED_SYMBOLS = ("lidar_cull_mask", "raydrop_sh_eval", "cull_ext_abi_version")
+
+# lidar_cull_mask's signature changed when the azimuth-wedge test was added;
+# an .so exporting an older ABI would raise TypeError on every call and send
+# the renderer to the slow fallback. Reject it up front like a missing symbol.
+_EXPECTED_ABI_VERSION = 3
+
 
 def _try_load() -> Any:
     """Compile and load the CUDA extension, or return ``None`` on failure."""
@@ -109,11 +122,30 @@ def _load_prebuilt() -> Any:
         so_path = build_dir / f"{_EXT_NAME}.so"
         if not so_path.exists():
             return None
+        # Staleness must be decided BEFORE importing: CPython caches C
+        # extensions by (name, path), so once a stale .so is imported, even a
+        # JIT rebuild in this same process gets the old module handed back.
+        # An .so older than the kernel source predates its latest edit; let
+        # the JIT path rebuild instead. (In the Docker flow the builder JITs
+        # after the sources are laid down, so the .so is always newer there
+        # and this fast path keeps working without nvcc.)
+        if so_path.stat().st_mtime < _SRC_PATH.stat().st_mtime:
+            return None
         from torch.utils.cpp_extension import _import_module_from_library  # type: ignore[attr-defined]
 
-        return _import_module_from_library(
+        mod = _import_module_from_library(
             _EXT_NAME, str(build_dir), is_python_module=True
         )
+        # Secondary guard for binaries whose mtime lies (e.g. copied around):
+        # a build missing any current binding is stale. Rejecting here can't
+        # rescue THIS process (the import above already pinned the module in
+        # CPython's extension cache) but it does let callers' fallbacks run
+        # correctly and the next process pick up the JIT-rebuilt .so.
+        if any(not hasattr(mod, sym) for sym in _EXPECTED_SYMBOLS):
+            return None
+        if int(mod.cull_ext_abi_version()) != _EXPECTED_ABI_VERSION:
+            return None
+        return mod
     except Exception:
         return None
 
@@ -155,10 +187,20 @@ def lidar_cull_mask(
     cos_min: float,
     sin_max: float,
     cos_max: float,
+    fwd_world: Optional[torch.Tensor] = None,
+    left_world: Optional[torch.Tensor] = None,
+    use_azim: bool = False,
+    az_center: float = 0.0,
+    az_halfwidth: float = 0.0,
+    az_pad: float = 0.0,
 ) -> torch.Tensor:
-    """Fused frustum + elevation-FOV cull. Returns a (N,) bool tensor.
+    """Fused frustum + elevation-FOV (+ azimuth-wedge) cull → (N,) bool tensor.
 
-    ``max_range=None`` disables the upper bound.
+    ``max_range=None`` disables the upper bound. The azimuth wedge (sector
+    rendering) keeps Gaussians whose linearized angular extent can overlap
+    ``[az_center - az_halfwidth, az_center + az_halfwidth]`` (radians, sensor
+    frame, wrap-aware) with ``az_pad`` extra slack; it needs the sensor's
+    +x/+y axes in world coordinates (``fwd_world`` / ``left_world``).
     """
     ext = _try_load()
     if ext is None:
@@ -166,11 +208,16 @@ def lidar_cull_mask(
             "splatsim CUDA cull extension is not available; "
             f"last load error: {_EXT_LOAD_ERROR!r}"
         )
+    if use_azim and (fwd_world is None or left_world is None):
+        raise ValueError("use_azim=True requires fwd_world and left_world")
+    axis_placeholder = sensor_pos  # any (3,) tensor; kernel ignores it
     return ext.lidar_cull_mask(
         means,
         scales,
         sensor_pos,
         up_world,
+        fwd_world if fwd_world is not None else axis_placeholder,
+        left_world if left_world is not None else axis_placeholder,
         float(min_range),
         float(max_range) if max_range is not None else -1.0,
         float(cull_scale_sigmas),
@@ -179,4 +226,8 @@ def lidar_cull_mask(
         float(cos_min),
         float(sin_max),
         float(cos_max),
+        bool(use_azim),
+        float(az_center),
+        float(az_halfwidth),
+        float(az_pad),
     )

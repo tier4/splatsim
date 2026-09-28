@@ -231,3 +231,22 @@ def test_end_to_end_render_matches_pytorch_fallback() -> None:
     assert hit_diff < 1e-3, (
         f"pixel occupancy differs on {hit_diff:.2%} of pixels between CUDA and PyTorch cull"
     )
+
+
+def test_loaded_ext_exposes_every_expected_symbol() -> None:
+    """A loaded extension must carry every binding the current source exports.
+
+    Regression guard for the stale-prebuilt bug: an ``.so`` built before
+    ``raydrop_sh_eval`` was added still loaded fine, callers' ``hasattr``
+    probes silently routed to the gsplat fallback, and the 5-sensor rig paid
+    ~15 ms/frame instead of ~2 ms with nothing failing anywhere. If this
+    test trips, the prebuilt staleness checks in ``_load_prebuilt`` let an
+    outdated binary through.
+    """
+    from splatsim import _lidar_cull_ext
+
+    ext = _lidar_cull_ext._try_load()
+    if ext is None:
+        pytest.skip("CUDA cull extension unavailable on this machine")
+    missing = [s for s in _lidar_cull_ext._EXPECTED_SYMBOLS if not hasattr(ext, s)]
+    assert not missing, f"stale cull extension loaded: missing bindings {missing}"
